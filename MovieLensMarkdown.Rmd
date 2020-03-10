@@ -1,0 +1,151 @@
+---
+title: "MovieLensMarkdown"
+output: pdf_document
+author: "Leo PeBenito"
+date: "3/9/2020"
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}  # Fixes table pos opt 'H'
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error=TRUE)
+setwd("~/TemplRprojects/MovieLens")
+load("~/TemplRprojects/MovieLens/movielensdata.RData") # load data sets: edx, validation, train, test
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(knitr)
+library(gridExtra)  # arrange figures
+```
+
+## Recommendation System: MovieLens Dataset
+
+
+Recommendation systems are different from ??? because...each outcome has a different set of prodictors
+
+
+Exploratory data analysis of the MovieLens 10M data set.
+Movie ratings obtained by research from the Lens lab.
+Ratings range from 0.5 to 5 stars.
+
+What is the distribution of movie ratings?
+The distribution of movie ratings shows the average rating is 3.5 stars.
+
+Looking at the average moving rating over time shows that the average rating is consistently 3.5 stars.
+
+```{r, echo=FALSE, fig.align='center', out.width='0.95\\linewidth', fig.cap="Bar plot of the number of ratings with a given number of stars divided by the total number of ratings plotted v. rating as the number of stars."}
+N  <- length(train_set$rating)
+mu <- mean(train_set$rating)
+train_set %>% group_by(rating) %>%
+  summarize(n = n()/N) %>% 
+  ggplot(aes(rating, n)) +
+  geom_bar(stat="identity") +
+  xlab("Movie rating (no. stars)") +
+  ylab("Ave. no. ratings") +
+  geom_vline(aes(xintercept=mu), col="red")
+```
+
+Very few ratings in 1995, and few ratings for 2009.
+Can try to account for this using regularization (but only if it's actually useful)...
+
+Investigage variation in movie ratings 
+```{r year, echo=FALSE, fig.align='center', out.width='\\linewidth', fig.cap=""}
+p1 <- train_set %>% group_by(year) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(year, n)) +
+  geom_bar(stat="identity") +
+  xlab("Year") +
+  ylab("Total No. Ratings") +
+  scale_y_continuous(labels = function(x) format(x, scientific=TRUE))
+  
+p2 <- train_set %>% group_by(year) %>%
+  summarize(ave=mean(rating)) %>%
+  ggplot(aes(year, ave, group=1)) +
+  geom_line() +
+  ylim(c(2.5,4.5)) +
+  xlab("Year") +
+  ylab("Ave. no. stars")
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+```{r month, echo=FALSE, fig.align='center', out.width='0.95\\linewidth', fig.cap=""}
+p1 <- train_set %>% group_by(month) %>%
+  summarize(ave=mean(rating), n=n()) %>% 
+  ggplot(aes(month, n)) +
+  geom_bar(stat="identity") +
+  xlab("Month") +
+  ylab("No. Ratings")
+
+p2 <- train_set %>% group_by(month) %>%
+  summarize(ave=mean(rating)) %>% 
+  ggplot(aes(month, ave, group=1)) +
+  geom_line() +
+  ylim(c(2.5,4.5)) +
+  xlab("Month") +
+  ylab("Ave. Rating")
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+```{r day, echo=FALSE, fig.align='center', out.width='0.95\\linewidth', fig.cap=""}
+p1 <- train_set %>% group_by(day) %>%
+  summarize(n=n()) %>% 
+  ggplot(aes(day, n)) +
+  geom_bar(stat="identity") +
+  xlab("Day of the Week") +
+  ylab("No. Ratings") +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+
+p2 <- train_set %>% group_by(day) %>%
+  summarize(ave=mean(rating)) %>% 
+  ggplot(aes(day, ave, group=1)) +
+  geom_line() +
+  ylim(c(2.5,4.5)) +
+  xlab("Day of the Week") +
+  ylab("Ave. Rating") +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+Clearly the overall average is 3.5 but if we guess 3.5 we will be wrong most of the time because most people either pick 3 or 4.
+In general whole star ratings are more common than half-star ratings (fig.1).
+
+
+```{r, echo=FALSE}
+train_set %>% group_by(month, year) %>%
+  summarize(avg_rating = mean(rating)) %>%
+  ggplot(aes(month, avg_rating, group=year, color=year)) +
+  geom_line() +
+  scale_color_gradientn(colors=rainbow(5))
+```
+
+```{r, echo=FALSE}
+train_set %>% group_by(day, year) %>%
+  summarize(avg_rating = mean(rating)) %>%
+  ggplot(aes(day, avg_rating, group=year, color=year)) +
+  geom_line() +
+  scale_color_gradientn(colors=rainbow(5))
+```
+
+```{r, echo=FALSE, fig.cap="fit of average rating each week using loess()"}
+train_set %>% filter(year > 1996) %>%
+  mutate(date = round_date(as_datetime(timestamp), unit="week")) %>%
+  group_by(date, year) %>%
+  summarize(rating=mean(rating)) %>%
+  ggplot(aes(date, rating, group=year, color=year)) +
+  geom_point() +
+    geom_smooth(color="black") +
+  scale_color_gradientn(colors=rainbow(5))
+```
+
+Model
+
+$$ Y_{u,i} = \mu + b_i + b_u + f(t) + ...$$
+
+```{r, echo=FALSE, results='asis', fig.pos='H'}
+kable(rmse_results, caption="RMSE Results")
+```
