@@ -1,0 +1,673 @@
+---
+title: "A Simple Recommendation System"
+author: "Leo PeBenito"
+date: "4/12/2020"
+output: 
+  bookdown::pdf_document2:
+    toc: False                  # Suppress table of contents
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}  # Fixes table pos opt 'H'
+  - \usepackage{caption}
+  - \captionsetup[figure]{font=small}
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#setwd("~/TemplRprojects/MovieLens")
+load("~/movielensdata.RData") # load data sets: edx, validation, train, test
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(knitr)
+library(gridExtra)  # arrange figures
+```
+
+## Introduction {-}
+
+Netflix is a streaming service for films and similar content.
+A defining feature of the Netflix platform is a user's ability to rate movies she or he has viewed.
+These ratings provide a valuable source of raw data that can be used to train a machine learning algorithm to make recommendations to Netflix users.
+Such algorithms are called recommendation systems.
+
+Recommendation systems are a formidable machine learning challenge.
+There are multiple predictors to consider that may be continuous or categorical.
+In addition, not every user has rated every film so outcomes need not depend on the same set of predictors.
+Rather than attempt to make movie recommendations to users, the following demonstrates the ability to predict the rating a user has given to a film she or he has already rated.
+This is because in practice there are no users to make actual recommendations to, making it impossible to validate the recommendation system.
+The Lens Lab data set used in this exercise consists of 10 million movie ratings.
+Films are rated on a scale from 0.5 to 5 stars in increments of 0.5.
+Zero star ratings are equivalent to no rating (NULL).
+
+The residual mean squared error (RMSE, eq.\@ref(eq:loss-func)) is defined as the loss function for model evaluation
+\begin{equation}
+{\tt RMSE} = \sqrt{ {1\over N} \sum_{i=1}^N ({\hat Y}_i - Y_i)^2 } (\#eq:loss-func)
+\end{equation}
+where ${\hat Y}$ is the predicted rating, $Y$ is the actual rating, and $N$ is the total number of ratings.
+The average rating serves as an initial model, which can then be refined based on the statistics of additional features of the data.
+The difference between the bulk average and the average rating associated with a specific component of the data is often called an effect or a bias.
+Here, biases are computed for four features of the data.
+The model is extended in a recursive fashion such that subsequent biases are computed relative to the preceding model.
+First biases are computed at the level of the individual such as the specific film and user.
+Next, biases are computed based on collections of the data.
+Biases are computed for continuous and categorical predictors, change over time and genre, respectively.
+Regularization is applied as the last step of model refinement.
+The resulting model has an RMSE below 0.8490.
+
+## Methods {-}
+
+The complete data set is partitioned into $\tt edx$ and $\tt validation$ sets, to start.
+The $\tt edx$ set is used exclusively for the first stage of model development.
+The $\tt edx$ set is further split up into $\tt training$ and $\tt testing$ sets.
+The model is developed using the $\tt edx$ subsets, $\tt training$ and $\tt testing$, momentarily feigning ignorance of the $\tt validation$ set.
+Only after demonstrating consistency in the model is it then re-trained on the intact $\tt edx$ set.
+In this fashion the penultimate step in model development mimics the final stage of training the model on the $\tt edx$ set before lastly applying it to the $\tt validation$ set.
+**Exploratory data analysis and accompanying insights are included in the results section**, following a detailed description of the procedure, to facilitate discussion and interpretation.
+
+R 3.6 is used for data analysis.
+The tidyverse is used for wrangling.
+The lubridate package is used to extract date information from time-stamp data.
+The caret package is used to generate partitions.
+The MovieLens 10M data set is obtained from the Lens Group web page.
+The code for loading the requisite packages, and downloading the data set and putting it into tidy format is prepended to the code for obtaining the final model provided in the accompanying script.
+
+## Procedure {-}
+
+Define the residual mean squared error as the loss function.
+
+```{r loss function}
+RMSE <- function(predicted_ratings, true_ratings){
+  sqrt(mean((predicted_ratings - true_ratings)^2))
+}
+```
+
+Partition the $\tt edx$ set into $\tt training$ and $\tt testing$ sets.
+
+```{r, make partitions}
+# Partition edx into testing and training sets based on ratings (outcomes).
+test_indices <- createDataPartition(y=edx$rating, times=1, p=0.1, list=FALSE)
+training <- edx[-test_indices,]
+temp  <- edx[test_indices,]
+
+# Omit movies and users in the testing set that do not appear in the training set
+testing  <- temp %>%
+  semi_join(training, by="movieId") %>%
+  semi_join(training, by="userId")
+
+# Specify the training and testing sets for the generic algorithm inputs
+train_set <- training
+test_set  <- testing
+```
+
+Begin with the simplest model, which amounts to simply guessing the average rating for all ratings.
+
+```{r Simplest Model}
+# Compute average
+mu <- mean(train_set$rating)
+
+# Predict the average for every rating
+prediction1 <- rep(mu, nrow(test_set))
+
+# Update results table
+rmse_results  <- tibble(method="Simplest Model", RMSE=RMSE(prediction1, test_set$rating))
+```
+
+Refine the model one step at a time based on explicit features of the data set.
+Account for bias toward each film relative to the overall average.
+
+```{r Movie Effect}
+# Compute movie effect
+movie_effect <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_movie = mean(rating - mu))
+
+# Update model
+prediction2 <- mu + test_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  .$b_movie
+
+# Update results table
+rmse_results  <- bind_rows(rmse_results,
+                          tibble(method="Movie Effect",
+                                 RMSE=RMSE(prediction2, test_set$rating)))
+```
+
+Append the user bias associated with each individual user to the previous model in a linear fashion.
+
+```{r Movie + User Effects}
+# Compute user effect
+user_effect <- train_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user = mean(rating - mu - b_movie))
+
+# Update model
+prediction3 <- test_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  left_join(user_effect,  by="userId")  %>%
+  mutate(pred = mu + b_movie + b_user)  %>%
+  .$pred
+
+# Update results table
+rmse_results  <- bind_rows(rmse_results,
+                           tibble(method="Movie + User Effects",
+                                  RMSE=RMSE(prediction3, test_set$rating)))
+```
+
+Treat the time-stamp as a continuous independent variable.
+Use the lubridate package to extract date information.
+
+```{r round date}
+# Compute date from timestamp rounding by week
+train_set <- training %>%
+  mutate(date_week = round_date(as_datetime(timestamp), unit="week"))
+
+test_set  <- testing  %>%
+  mutate(date_week = round_date(as_datetime(timestamp), unit="week"))
+```
+
+R provides myriad ways to find the best-fit curve.
+However, given the relatively large size of the data set, group ratings on a weekly basis.
+Compute the temporal bias associated with the moving average rating after each week.
+
+```{r Movie + User + Date Effects}
+# Compute date effect
+date_effect <- train_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  left_join(user_effect,  by="userId")  %>%
+  group_by(date_week) %>%
+  summarize(b_date = mean(rating - mu - b_movie - b_user))
+
+# Update model
+prediction4 <- test_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  left_join(user_effect,  by="userId")  %>%
+  left_join(date_effect,  by="date_week") %>%
+  mutate(pred = mu + b_movie + b_user + b_date) %>%
+  .$pred
+
+# Update results table
+rmse_results  <- bind_rows(rmse_results,
+                           tibble(method="Movie + User + Date Effects",
+                                  RMSE=RMSE(prediction4, test_set$rating)))
+```
+
+A film typically falls into more than one genre.
+For each entry, the pipe character is used to separate each genre within the genres field, ie:
+\vspace{0.5cm}
+```{r, echo=FALSE}
+  edx[1,][,c(5,6)] %>% kable() #%>% kable_styling(position = "center")
+```
+\vspace{0.5cm}
+For simplicity, do not decompose values in the genres column into constituent components.
+Compute the bias based on genres treating it as an aggregate predictor.
+
+```{r Movie + User + Genres + Date Effects}
+# Compute genres effect
+genres_effect <- train_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  left_join(user_effect,  by="userId")  %>%
+  left_join(date_effect,  by="date_week") %>%
+  group_by(genres) %>%
+  summarize(b_genres = mean(rating - mu - b_movie - b_user - b_date))
+
+# Update model
+prediction5 <- test_set %>%
+  left_join(movie_effect, by="movieId") %>%
+  left_join(user_effect,  by="userId")  %>%
+  left_join(date_effect,  by="date_week") %>%
+  left_join(genres_effect, by="genres") %>%
+  mutate(pred = mu + b_movie + b_user + b_date + b_genres) %>%
+  .$pred
+
+# Update results table
+rmse_results  <- bind_rows(rmse_results,
+                           tibble(method="Movie + User + Date + Genres Effects",
+                                  RMSE=RMSE(prediction5, test_set$rating)))
+```
+
+Provided there is a progressive decrease in RMSE at each model refinement step it is appropriate to perform regularization.
+Consider the simple case during the early stage of model refinement when the first bias is computed.
+Minimize the following equation (eq.\@ref(eq:loss-new)) rather than the RMSE
+\begin{equation}
+{1\over N}\sum_{u,i} (y_{u,i} - \mu - b_i)^2 + \lambda\sum_i b_i^2 (\#eq:loss-new).
+\end{equation}
+The first summation is the least squares term.
+The second term is a penalty term.
+Estimate $b_i$ as (eq.\@ref(eq:bias-new))
+\begin{equation}
+{\hat b}_i(\lambda)={1\over \lambda + n_i}\sum_{u=1}^{n_i} (Y_{u,i}-{\hat\mu}) (\#eq:bias-new).
+\end{equation}
+To also include the user effect minimize the following (eq.\@ref(eq:loss-new2))
+\begin{equation}
+{1\over N}\sum_{u,i}(y_{u,i}-\mu-b_i-b_u)^2 + \lambda \Bigl( \sum_i b_i^2 + \sum_u b_u^2 \Bigr) (\#eq:loss-new2).
+\end{equation}
+Each subsequent bias ($b$) is computed in a similar fashion.
+Cross-validation is used to find $\lambda$, which is a tuning parameter.
+Cross-validation is first performed using only the $\tt training$ and $\tt testing$ sets.
+
+```{r Training, echo=TRUE}
+# Regularization of movie rating by movieId, userId, date rounded by week, genres
+lambdas <- seq(4.5, 6, 0.1)
+
+# Cross-validation
+training_rmses <- sapply(lambdas, function(lambda){
+  
+  b_movie <- train_set %>%
+    group_by(movieId)  %>%
+    summarize(b_movie = sum(rating - mu)/(n()+lambda))
+  
+  b_user <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    group_by(userId)  %>%
+    summarize(b_user = sum(rating - mu - b_movie)/(n()+lambda))
+  
+  b_date <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    group_by(date_week) %>%
+    summarize(b_date = sum(rating - mu - b_movie - b_user)/(n()+lambda))
+  
+  b_genres <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    left_join(b_date,  by="date_week") %>%
+    group_by(genres) %>%
+    summarize(b_genres = sum(rating - mu - b_movie - b_user - b_date)/(n()+lambda))
+  
+  predicted_ratings <- test_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    left_join(b_date,  by="date_week") %>%
+    left_join(b_genres, by="genres") %>%
+    mutate(pred = mu + b_movie + b_user + b_date + b_genres) %>%
+    .$pred
+  
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+# Regularization lambda from cross-validation on training and testing sets
+training_lambda <- lambdas[which.min(training_rmses)]
+
+# Update results table
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="All Effects + Regularization",
+                                  RMSE=min(training_rmses)))
+```
+
+Training the resulting model on the $\tt edx$ set and applying it on the $\tt validation$ set using the parameters derived by cross-validation on the $\tt edx$ partitions, $\tt training$ and $\tt testing$, is a key step in model validation.
+If the two RMSEs are comparable this suggests consistency among model outcomes.
+The last step is to re-train the model on the $\tt edx$ set, rounding unphysical predictions at the extrema to the nearest possible rating, and apply it to the $\tt validation$ set.
+
+```{r training lambda on edx, echo=FALSE}
+# Compute date for edx and validation sets
+train_set <- edx %>%
+  mutate(date_week = round_date(as_datetime(timestamp), unit="week"))
+test_set  <- validation %>%
+  mutate(date_week = round_date(as_datetime(timestamp), unit="week"))
+
+b_movie <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_movie = sum(rating - mu)/(n()+training_lambda))
+  
+b_user <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user = sum(rating - mu - b_movie)/(n()+training_lambda))
+  
+b_date <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  group_by(date_week) %>%
+  summarize(b_date = sum(rating - mu - b_movie - b_user)/(n()+training_lambda))
+  
+b_genres <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  left_join(b_date,  by="date_week") %>%
+  group_by(genres) %>%
+  summarize(b_genres = sum(rating - mu - b_movie - b_user - b_date)/(n()+training_lambda))
+  
+predicted_ratings <- test_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  left_join(b_date,  by="date_week") %>%
+  left_join(b_genres, by="genres") %>%
+  mutate(pred = mu + b_movie + b_user + b_date + b_genres) %>%
+  .$pred
+
+# Update results table
+rmse_results  <- bind_rows(rmse_results,
+                           tibble(method="Apply Model using Training-lambda to edx and validation sets",
+                                  RMSE=RMSE(predicted_ratings, test_set$rating)))
+```
+
+Discretize the model as an additional check. 
+Create bins of width 0.5 stars symmetrically bordering internal positions on the rating scale.
+Shift predicted ratings within each bin to the central rating within each bin.
+All remaining predictions are near the scale boundaries, shift these to the nearest possible rating of 0.5 or 5 stars.
+
+```{r discretize predicted ratings}
+# Discretize model
+disc_predicted_ratings <- data.frame(predicted_ratings) %>%
+  mutate(rating = ifelse(predicted_ratings >= 4.75, 5,
+                  ifelse(between(predicted_ratings, 4.25, 4.75), 4.5,
+                  ifelse(between(predicted_ratings, 3.75, 4.25), 4,
+                  ifelse(between(predicted_ratings, 3.25, 3.75), 3.5,
+                  ifelse(between(predicted_ratings, 2.75, 3.25), 3,
+                  ifelse(between(predicted_ratings, 2.25, 2.75), 2.5,
+                  ifelse(between(predicted_ratings, 1.75, 2.25), 2,
+                  ifelse(between(predicted_ratings, 1.25, 1.75), 1.5,
+                  ifelse(between(predicted_ratings, 0.75, 1.25), 1, 0.5))))))))))
+```
+
+## Results {-}
+
+Movie ratings tend to be high (fig. \@ref(fig:hist-ratings)).
+The mean is greater than the midpoint of the rating scale, and the median equal to `r median(edx$rating)` is above the mean.
+Whole star ratings are more common than half star ratings, and ratings are concentrated around the mean of `r mean(edx$rating)`.
+\vspace{0.5cm}
+
+```{r hist-ratings, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram (10 bins) for movie ratings (number of stars) from the edx set.  The vertical red line corresponds to the average rating, which serves as the starting point for model development."}
+train_set %>%
+  ggplot(aes(rating))  +
+  geom_histogram(stat="bin", color="#000000", fill="#999999", bins=10) +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  geom_vline(aes(xintercept=mu), col="#CC79A7") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+Accounting for the movie effect generates a distribution of ratings (fig. \@ref(fig:hist-model2)).
+
+```{r hist-model2, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram of predicted ratings based on the model including the movie effect (50 bins)."}
+data.frame(prediction2) %>%
+  ggplot(aes(prediction2)) +
+  geom_histogram(stat="bin", color="#D55E00", fill="#E69F00", alpha=0.5, bins=50) +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+Accommodating the user effect smooths the distribution (fig. \@ref(fig:hist-model3)).
+\vspace{0.5cm}
+
+```{r hist-model3, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram of predicted ratings based on the model including the movie and user effects (50 bins)."}
+data.frame(prediction3) %>%
+  ggplot(aes(prediction3)) +
+  geom_histogram(stat="bin", color="#D55E00", fill="#E69F00", alpha=0.5, bins=50) +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+There are unphysical predictions, those less than zero or above five stars, at the model stage where movie and user effects are included.
+The minimum and maximum predicted ratings are `r min(prediction3)` and `r max(prediction3)` stars, respectively.
+To adjust for this, predictions less than 0.5 and above 5, are shifted to 0.5 and 5, respectively.
+This procedure tends to decrease the RMSE but is postponed until the last step.
+
+The average rating on a given week (fig. \@ref(fig:weekly-ave)) fluctuates around the mean.
+Starting in the year 2000 there is some overall trend that changes gradually over the course of years.
+In the early stages of data collection the fluctuations tend to be a bit larger, however these data points typically rely on smaller samples.
+\vspace{0.5cm}
+
+```{r weekly-ave, echo=FALSE, fig.align='center', fig.width=7, fig.height=2.5, fig.cap="(Left) Scatter plot of the number of ratings made on a weekly basis v. the date rounded to the nearest week.  The average number of ratings made on a given week is shown by a horizontal red line.  Points corresponding to a number of ratings that is less than or equal to one standard deviation below the mean are colored green.  (Right) Scatter plot of the average rating computed on a weekly basis.  The overall average is shown by the red horizontal line.  The overall weekly average rating (number of stars) is shown by a red horizontal line.  Again, points corresponding to a number of ratings that is less than or equal to one standard deviation below the mean number of weekly ratings are colored green."}
+weekly_ratings <- edx %>%
+  mutate(date_week = round_date(as_datetime(timestamp), unit="week")) %>%
+  group_by(date_week) %>%
+  summarize(weekly_avg = mean(rating), weekly_n = n())
+
+p1 <- ggplot(data=weekly_ratings, aes(date_week,weekly_n)) +
+  geom_point(col="black") +
+  geom_point(data=weekly_ratings[which(weekly_ratings$weekly_n <= (mean(weekly_ratings$weekly_n) - sd(weekly_ratings$weekly_n))),], col="#009E73") +
+  geom_hline(aes(yintercept=mean(weekly_n)), col="#CC79A7") +
+  xlab("date (rounded by week)") +
+  ylab("# of ratings") +
+  theme_light() +
+  coord_fixed(ratio=2250) +
+  theme(axis.title=element_text(size=10),
+        axis.title.x=element_text(vjust=-1.0),
+        axis.title.y=element_text(vjust=2.0))
+
+p2 <- ggplot(data=weekly_ratings, aes(date_week, weekly_avg)) +
+  geom_point() +
+  geom_point(data=weekly_ratings[which(weekly_ratings$weekly_n <= (mean(weekly_ratings$weekly_n) - sd(weekly_ratings$weekly_n))),], col="#009E73") +
+  geom_hline(aes(yintercept=mu), col="#CC79A7") +
+  xlab("date (rounded by week)") +
+  ylab("average (# of stars) rating") +
+  theme_linedraw() +
+  coord_fixed(ratio=200000000) +
+  theme(axis.title=element_text(size=10),
+        axis.title.x=element_text(vjust=-1.0),
+        axis.title.y=element_text(vjust=2.0))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+The bias related to changes in the average rating over time contributes only slightly to the model's distribution of predictions (fig. \@ref(fig:hist-model4)).
+\vspace{0.5cm}
+
+```{r hist-model4, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram of predicted ratings based on the model including the movie, user, and date effects (50 bins)."}
+data.frame(prediction4) %>%
+  ggplot(aes(prediction4)) +
+  geom_histogram(stat="bin", color="#D55E00", fill="#E69F00", alpha=0.5, bins=50, position="stack") +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+There are `r edx %>% group_by(genres) %>% summarize(ave = mean(rating)) %>% .$ave %>% length()` distinct genre combinations (categories), in the genres field.
+The average rating for genres ranges from `r edx %>% group_by(genres) %>% summarize(ave = mean(rating)) %>% .$ave %>% min()` to `r edx %>% group_by(genres) %>% summarize(ave = mean(rating)) %>% .$ave %>% max()` stars.
+The top rated genres category is `r edx %>% group_by(genres) %>% summarize(ave = mean(rating)) %>% arrange(desc(ave)) %>% head(1) %>% .$genres`.
+The lowest rated genres category is `r edx %>% group_by(genres) %>% summarize(ave = mean(rating)) %>% arrange(ave) %>% head(1) %>% .$genres`.
+Genres at the tails of the average rating spectrum tend to have relatively few data points.
+In contrast, genres with more ratings tend to have average ratings closer to the mean, as shown below.
+\vspace{0.5cm}
+
+```{r, echo=FALSE}
+  edx %>% group_by(genres) %>% summarize(Ave_Rating = mean(rating), N_Ratings = n()) %>% arrange(desc(N_Ratings)) %>% head() %>% kable()
+```
+\vspace{0.5cm}
+The genres predictor has a subtle but nonetheless beneficial impact on the RMSE.  The resulting distribution of rating predictions (fig. \@ref(fig:hist-model5)) is almost indistinguishable from the previous model.
+\vspace{0.5cm}
+
+```{r hist-model5, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram of predicted ratings based on the model including the movie, user, and date effects (50 bins)."}
+data.frame(prediction5) %>%
+  ggplot(aes(prediction5)) +
+  geom_histogram(stat="bin", color="#D55E00", fill="#E69F00", alpha=0.5, bins=50, position="stack") +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+Regularization is performed at the model stage consisting of movie, user, date, and genres effects.
+Cross-validation on the $\tt training$ and $\tt testing$ sets produces a $\lambda$ value of `r training_lambda`.
+When the algorithm derived using the $\tt training$ and $\tt testing$ sets is applied to the $\tt edx$ and $\tt validation$ sets the RMSE is further improved.
+The optimal value of $\lambda$ is recalculated using cross-validation on the $\tt edx$ and $\tt validation$ sets .
+\vspace{0.5cm}
+
+```{r final-cross, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Scatter plot of rmse v. lambda with the minimum RMSE value indicated by a filled point illustrates the cross-validation process."}
+# Regularization of movie rating by movieId, userId, date rounded by week, genres
+mu <- mean(edx$rating)  # re-compute the mean of edx ratings
+
+# Cross-validation
+rmses <- sapply(lambdas, function(lambda){
+  
+  b_movie <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_movie = sum(rating - mu)/(n()+lambda))
+  
+  b_user <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_user = sum(rating - mu - b_movie)/(n()+lambda))
+  
+  b_date <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    group_by(date_week) %>%
+    summarize(b_date = sum(rating - mu - b_movie - b_user)/(n()+lambda))
+  
+  b_genres <- train_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    left_join(b_date,  by="date_week") %>%
+    group_by(genres) %>%
+    summarize(b_genres = sum(rating - mu - b_movie - b_user - b_date)/(n()+lambda))
+  
+  predicted_ratings <- test_set %>%
+    left_join(b_movie, by="movieId") %>%
+    left_join(b_user,  by="userId")  %>%
+    left_join(b_date,  by="date_week") %>%
+    left_join(b_genres, by="genres") %>%
+    mutate(pred = mu + b_movie + b_user + b_date + b_genres) %>%
+    .$pred  
+  
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+lambda <- lambdas[which.min(rmses)]  # Regularization lambda
+
+data.frame(lambdas, rmses) %>%
+  ggplot(aes(lambdas, rmses)) +
+  geom_point(shape=21, fill="#FFFFFF") +
+  geom_point(data=data.frame(x=lambda, y=min(rmses)), aes(x,y), shape=19) +
+  xlab("lambda") +
+  ylab("RMSE") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+Now, the $\lambda$ value determined by cross-validation equals `r lambda`.
+Unphysical ratings beyond the minimum or maximum rating are shifted to the nearest possible rating when computing RMSE (fig. \@ref(fig:final-cross)).
+The distribution of the final model is show in figure \@ref(fig:final-model).
+\vspace{0.5cm}
+
+```{r final-model, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram of predicted ratings based on the final model (50 bins)."}
+b_movie <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_movie = sum(rating - mu)/(n()+lambda))
+  
+b_user <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user = sum(rating - mu - b_movie)/(n()+lambda))
+  
+b_date <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  group_by(date_week) %>%
+  summarize(b_date = sum(rating - mu - b_movie - b_user)/(n()+lambda))
+  
+b_genres <- train_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  left_join(b_date,  by="date_week") %>%
+  group_by(genres) %>%
+  summarize(b_genres = sum(rating - mu - b_movie - b_user - b_date)/(n()+lambda))
+  
+predicted_ratings <- test_set %>%
+  left_join(b_movie, by="movieId") %>%
+  left_join(b_user,  by="userId")  %>%
+  left_join(b_date,  by="date_week") %>%
+  left_join(b_genres, by="genres") %>%
+  mutate(pred = mu + b_movie + b_user + b_date + b_genres) %>%
+  mutate(pred = ifelse(pred < 0.5, 0.5,
+                     ifelse(pred > 5, 5, pred))) %>% .$pred  
+  
+final_rmse <- RMSE(predicted_ratings, test_set$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Final Model",
+                                 RMSE=final_rmse))
+
+data.frame(predicted_ratings) %>%
+  ggplot(aes(predicted_ratings)) +
+  geom_histogram(stat="bin", color="#0072B2", fill="#56B4E9", alpha=0.5, bins=50) +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+RMSE values at each stage of model development are shown in table \@ref(tab:results-table).
+There is a continuous decrease in the RMSE at each stage of model development.
+The largest improvements to the model are made in the early stages of development, when movie and user effects are introduced.
+Effects coming from the date and genres have less of an impact.
+Regularization also has only a modest influence on the RMSE.
+The RMSE for the final model trained on the $\tt edx$ set and applied to the $\tt validation$ set is less than 0.86490.
+\vspace{0.5cm}
+
+```{r results-table, echo=FALSE, results='asis', fig.pos='H'}
+kable(rmse_results, caption="RMSE Results at Each Stage of Model Refinement", position='H')
+```
+\vspace{0.5cm}
+Discretizing the final model has a detrimental impact on the RMSE.
+The RMSE goes up to `r RMSE(disc_predicted_ratings$rating, validation$rating)`.
+The discretized model (red) is show behind the final model (blue) and in front of the actual ratings in the $\tt validation$ set (grey) in figure \@ref(fig:disc-model).
+\vspace{0.5cm}
+
+```{r disc-model, echo=FALSE, fig.align='center', out.width='0.5\\linewidth', fig.cap="Histogram for the number of stars.  The final model is shown in blue, the result of discretizing the final model is shown in red, and the actual ratings from the validation set are shown in grey with black outlines.  The number of bins is 10 for the actual ratings and the discretized model, and 50 for the final model predictions."}
+data.frame(predicted_ratings) %>%
+  ggplot(aes(predicted_ratings)) +
+  geom_histogram(data=test_set, aes(rating), stat="bin", color="#000000", fill="#999999", alpha=0.5, bins=10) +
+  geom_histogram(data=disc_predicted_ratings, aes(rating), stat="bin", color="#CC79A7", fill="#CC79A7", alpha=0.5, bins=10) +
+  geom_histogram(stat="bin", color="#0072B2", fill="#56B4E9", alpha=0.5, bins=50) +
+  xlab("rating (# of stars)") +
+  ylab("# of ratings") +
+  theme_light() +
+  theme(text=element_text(size=15),
+        axis.title=element_text(size=15),
+        axis.title.x=element_text(vjust=-0.75),
+        axis.title.y=element_text(vjust=2.0))
+```
+
+## Conclusions {-}
+
+In the case of recommendation systems accurate predictions generally evade simple machine learning approaches like linear and logistic regression.
+K-nearest neighbors (Knn) and decision trees are attractive alternatives for their flexibility.
+However, computational intensity limits application of such approaches on standard laptop computers for even a modestly large data set.
+Principle component analysis (PCA) is a natural addendum to the model described above as it can be included linearly.
+While less so than Knn and decision trees, PCA is sufficiently computationally demanding that it is left for future work.
+
+The methodology shown here consists of computing the average and computing biases (also known as effects) associated with explicit features of the data.
+The more specific these predictors are the better.
+As seen for predictors based on the specific film and on a given user, accounting for bias at the level of the individual results in the greatest decrease in RMSE.
+Predictors based on collections of the data such as the moving average over time, or categories such as genre, may not deviate much from the average but the associated bias may nonetheless provide improvements to the RMSE.
+It is straight forward to compute the temporal and genre effects on an individual basis for movies an users.
+Instead regularization is used to make the most of available predictors by penalizing large estimates that come from a relatively small number of observations, thereby sacrificing granularity for speed.
+
+Two common factors contribute to the difficulty of creating the recommendation system.
+The first is the inherent uncertainty of movie ratings, these outcomes are not deterministic but random.
+That is to say that obtaining more data with higher granularity will not necessarily improve predictions.
+The second is that the rating system is discrete.
+The model generates a fairly smooth distribution that concentrates predictions around the mean rating (number of stars) of ~3.5, but the most common ratings are four and three.
+Due to tapering at the tail of the distribution, five star predictions almost never occur although it is the third most common rating, accounting for ~`r round(100*(length(which(edx$rating == 5)) + length(which(validation$rating == 5))) / (length(edx$rating) + length(validation$rating)))`% of the data.
+In conclusion, a next step in exploratory data analysis might be directed at discerning whole start from half star ratings.
