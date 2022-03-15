@@ -1,3 +1,3 @@
-# MovieLens
+# Recommendation System
 
-Codes for evaluating, or measuring the efficacy of, a recommendation system, but not for making recommendations.
+Codes for evaluating a recommendation system based on regularization.
